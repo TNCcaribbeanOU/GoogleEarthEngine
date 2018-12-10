@@ -1,0 +1,202 @@
+var geometry = /* color: #d63000 */ee.Geometry.Polygon(
+        [[[-79.28370551420096, 27.31322263692994],
+          [-82.05226020170096, 25.9382959190518],
+          [-83.06300238920096, 24.427154294578063],
+          [-85.21632270170096, 23.30191015682676],
+          [-85.83155707670096, 22.32976140172064],
+          [-85.26026801420096, 20.694470798179825],
+          [-83.01905707670096, 20.571091101242914],
+          [-82.14015082670096, 20.28281791633468],
+          [-82.14015082670096, 18.833524704715565],
+          [-81.04151801420096, 17.413555498473396],
+          [-76.69093207670096, 16.488774364621857],
+          [-72.95558051420096, 16.488774364621857],
+          [-72.42823676420096, 10.768565469373785],
+          [-66.89112738920096, 10.206822751677247],
+          [-64.95753363920096, 9.55742705516435],
+          [-62.97999457670096, 9.774034257945146],
+          [-61.04640082670096, 9.037012611224066],
+          [-59.15675238920096, 10.293310676660061],
+          [-58.27784613920096, 14.370843500504561],
+          [-59.28858832670096, 16.95173364195169],
+          [-61.74952582670096, 19.248931613481872],
+          [-64.73780707670096, 20.694470798179825],
+          [-67.28663520170096, 20.40642969254814],
+          [-69.61573676420096, 20.858820981132652],
+          [-70.49464301420096, 22.6140199530643],
+          [-73.43897895170096, 24.26700625424706],
+          [-74.53761176420096, 25.89877078366052],
+          [-75.24073676420096, 27.430298467984862],
+          [-77.48194770170096, 27.70299244298634]]]);
+
+var aoi = /* color: #d63000 */geometry;
+
+// This function masks clouds in Landsat imagery.
+var maskClouds = function(image) {
+  var scored = ee.Algorithms.Landsat.simpleCloudScore(image);
+  return image.updateMask(scored.select(['cloud']).lt(20)); //lt = less than; less than 20% cloud cover used
+};
+
+// This function masks clouds and adds quality bands to Landsat images.
+var addQualityBands = function(image) {
+  return maskClouds(image)
+    // NDVI
+    .addBands(image.normalizedDifference(['B5', 'B4'])) //band 5 = SWIR, 4 = red
+    // time in days
+    .addBands(image.metadata('system:time_start')); //??
+};
+
+var imageAr = [];
+
+var years = [2013, 2014, 2015, 2016, 2017, 2018] //2013-2018
+
+for (var i = 0; i < years.length; i++) { //iterate through years
+  var year = years[i];
+  // Map the cloud masking and quality band function over the collection.
+  var collection = ee.ImageCollection('LANDSAT/LC08/C01/T1_TOA') //Landsat 8?
+    .filterDate(year + '-01-01', year +'-12-31') //export each year as a separate layer
+    .filterBounds(aoi) //within area of interest
+    .map(addQualityBands); //mask clouds, add NDVI band created above, time in days?
+  
+  // Create a cloud-free, most recent value composite.
+  var recentValueComposite = collection.qualityMosaic('system:time_start');
+  
+  // Create a greenest pixel composite.
+  var greenestPixelComposite = collection.qualityMosaic('nd'); //mosaic of ndvi layer per year (one layer)
+  
+  var vizParams = {bands: ['B4', 'B3', 'B2'], min: 0, max: 0.4}; //display with rgb bands
+  
+  var vizParamsNDVI = {bands: ['nd'], min: 0.5, max: 1};
+  //Map.addLayer(greenestPixelComposite, vizParamsNDVI, 'NDVI greenest pixel composite ' + year);
+  //Map.addLayer(greenestPixelComposite, vizParams, 'greenest pixel composite ' + year);
+
+  var NDVIOnly = greenestPixelComposite.select(['nd']);
+  var renamed = greenestPixelComposite.select( //rename each ndvi layer to have year in name
+    ['nd'], // old names
+    ['nd_' + year]               // new names 
+  );
+  //Map.addLayer(NDVIOnly, vizParamsNDVI, 'NDVI greenest pixel composite ' + year);
+  
+
+  imageAr.push(renamed)
+//Export.image.toDrive({
+//  image: greenestPixelComposite,
+//  description: 'greenest_comp_' + year,
+//  scale: 30,
+//  region: aoi
+//});
+
+}
+
+var NDVIcollection = ee.ImageCollection.fromImages(imageAr);
+  
+  
+var stackCollection = function(collection) {
+  // Create an initial image.
+  var first = ee.Image(collection.first()).select([]);
+
+  // Write a function that appends a band to an image.
+  var appendBands = function(image, previous) {
+    return ee.Image(previous).addBands(image);
+  };
+  return ee.Image(collection.iterate(appendBands, first));
+};
+
+var stacked = stackCollection(NDVIcollection);
+print('stacked image', stacked); //add all ndvi layers (per year) to map?
+
+//var vizParams = {bands: ['nd_2013', 'nd_2015', 'nd_2017'], min: -1, max: 1};
+// Display the first band of the stacked image.
+//Map.addLayer(stacked, vizParams, 'stacked');
+
+// Reduce the region. The region parameter is the Feature geometry.
+//var meanDictionary = stacked.reduceRegion({
+//  reducer: ee.Reducer.mean(),
+//  geometry: geometry,
+//  scale: 30,
+//  maxPixels: 1e9
+//});
+
+// The result is a Dictionary.  Print it.
+//print(meanDictionary);
+
+
+
+
+// Compute the EVI using an expression. (EVI = enhanced vegetation index?)
+var totchange = stacked.expression(
+    '(nd_2014 - nd_2013) + (nd_2015 - nd_2014) + (nd_2016 - nd_2015) + (nd_2017 - nd_2016)', {
+      'nd_2013': stacked.select('nd_2013'),
+      'nd_2014': stacked.select('nd_2014'),
+      'nd_2015': stacked.select('nd_2015'),
+      'nd_2016': stacked.select('nd_2016'),
+      'nd_2017': stacked.select('nd_2017')
+}); //sum of differences between each set of consecutive years
+var nd_2013 = stacked.expression(
+  'nd_2013', {
+    'nd_2013':stacked.select('nd_2013')
+  });
+var nd_2014 = stacked.expression(
+  'nd_2014', {
+    'nd_2014':stacked.select('nd_2014')
+  });
+var nd_2015 = stacked.expression(
+  'nd_2015', {
+    'nd_2015':stacked.select('nd_2015')
+  });
+var nd_2016 = stacked.expression(
+  'nd_2016', {
+    'nd_2016':stacked.select('nd_2016')
+  });
+var nd_2017 = stacked.expression(
+  'nd_2017', {
+    'nd_2017':stacked.select('nd_2017')
+  });
+var nd_2018 = stacked.expression(
+  'nd_2018', {
+    'nd_2018':stacked.select('nd_2018')
+  });
+Map.addLayer(totchange, {min: -0.3, max: 0.3, palette: ['FF0000','000000' , '00FF00']}, 'NDVI_diff');
+// Map.addLayer(nd_2013, {min: 0, max: 1, palette: ['blue', 'white', 'green']}, 'NDVI_2013');
+// Map.addLayer(nd_2014, {min: 0, max: 1, palette: ['blue', 'white', 'green']}, 'NDVI_2014');
+// Map.addLayer(nd_2015, {min: 0, max: 1, palette: ['blue', 'white', 'green']}, 'NDVI_2015');
+// Map.addLayer(nd_2016, {min: 0, max: 1, palette: ['blue', 'white', 'green']}, 'NDVI_2016');
+// Map.addLayer(nd_2017, {min: 0, max: 1, palette: ['blue', 'white', 'green']}, 'NDVI_2017');
+// Map.addLayer(nd_2018, {min: 0, max: 1, palette: ['blue', 'white', 'green']}, 'NDVI_2018');
+
+// // Load a FeatureCollection from a Fusion Table.
+// var fromFT = ee.FeatureCollection('ft:1wbmhJW4KM_pW4AOOecwDuoskKxED5QxS3JdrOnwu'); //EEZs
+// //https://fusiontables.google.com/data?docid=1wbmhJW4KM_pW4AOOecwDuoskKxED5QxS3JdrOnwu#rows:id=1
+// var mangroves1 = ee.FeatureCollection('ft:1QiueAuGS8bmcAV9e5AYJfibPOqR8YkWCTyvcwRuX'); //mangroves portion
+// //https://fusiontables.google.com/data?docid=11qJ0SIu8JyZGMBG4kFdE37CqpM06Cvoy3Z89LxcD#map:id=3
+// var mangroves2 = ee.FeatureCollection('ft:1NpzIfcPsgjDa8694u_ti1bNtTZ0rF8EKvnrGrrcJ'); //mangroves portion
+// //https://fusiontables.google.com/data?docid=1NpzIfcPsgjDa8694u_ti1bNtTZ0rF8EKvnrGrrcJ#rows:id=1
+// var mangroves3 = ee.FeatureCollection('ft:1LBQJIi4RpOTSx8wr70UePbYx9aDYHXHeeSRodn8U'); //mangroves portion
+// //https://fusiontables.google.com/data?docid=1LBQJIi4RpOTSx8wr70UePbYx9aDYHXHeeSRodn8U#rows:id=1
+// var mangroves4 = ee.FeatureCollection('ft:1sei9E3vobw_UrE8LgGWfZpegZD1H3aNQEzLSnU10'); //mangroves portion
+// //https://fusiontables.google.com/data?docid=1sei9E3vobw_UrE8LgGWfZpegZD1H3aNQEzLSnU10#rows:id=1
+var mangroves5 = ee.FeatureCollection('ft:1rfkgTvlTtQRChU3JTK8ML40B7TRNfF7blaPlbsPl'); //mangroves portion
+//https://fusiontables.google.com/data?docid=1rfkgTvlTtQRChU3JTK8ML40B7TRNfF7blaPlbsPl#rows:id=1
+
+
+// Print and display the FeatureCollection.
+// print(fromFT);
+// Map.addLayer(fromFT, {}, 'From Fusion Table');
+print(mangroves5);
+Map.addLayer(mangroves5, {}, 'Mangroves5');
+
+//Compute means of the specific mangroves, grouped by ID
+var means = totchange.reduceRegions({
+  collection: mangroves5,
+  reducer: ee.Reducer.mean(),
+  scale: 30,
+});
+//print(means);
+Export.table.toDrive({
+    collection: means, 
+    description: 'MeanNDVIchange_perMangrove5', 
+    folder: 'mangrove_NDVIchangeMeans', 
+    fileNamePrefix: 'Part5', 
+    fileFormat: 'CSV'
+})
+
